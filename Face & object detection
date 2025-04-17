@@ -5,133 +5,126 @@ import numpy as np
 import threading
 from facenet_pytorch import MTCNN
 
-# Load models
-model = YOLO('yolov8n.pt')  # Lightweight YOLO model
-device = "cuda" if torch.cuda.is_available() else "cpu"  # Use GPU if available, otherwise CPU
-print(f"Using device: {device}")
-mtcnn = MTCNN(keep_all=True, device=device)  # Initialize MTCNN for face detection
+# Initialize models
+detector = YOLO('yolov8n.pt')  # Using a lightweight YOLO variant
+compute_device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Running on: {compute_device}")
+face_detector = MTCNN(keep_all=True, device=compute_device)
 
-# Camera settings
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # Set frame width
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)  # Set frame height
+# Setup webcam stream
+camera = cv2.VideoCapture(0)
+camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-# Distance settings
-KNOWN_WIDTH = 0.5  # Real-world object width (in meters)
-FOCAL_LENGTH = 700  # Camera focal length (in millimeters)
+# Parameters for distance estimation
+REAL_WIDTH = 0.5  # Actual object width in meters
+CAMERA_FOCAL = 700  # Focal length in millimeters
 
-# Function to calculate the real-world distance of an object
-def calculate_distance(box_width_in_pixels):
+def estimate_distance(pixel_width):
     """
-    Calculate the real-world distance of an object in meters
+    Estimate distance from camera based on object's pixel width.
     """
-    if box_width_in_pixels > 0:
-        return (KNOWN_WIDTH * FOCAL_LENGTH) / box_width_in_pixels
+    if pixel_width > 0:
+        return (REAL_WIDTH * CAMERA_FOCAL) / pixel_width
     return None
 
-# Shared variables for threading
-frame = None
-results_yolo = []
-results_faces = []
-lock = threading.Lock()
+# Shared resources
+current_frame = None
+yolo_detections = []
+face_detections = []
+frame_lock = threading.Lock()
 
-# YOLO thread
-def process_yolo():
-    global frame, results_yolo
+# Thread function: Object Detection
+def yolo_thread():
+    global current_frame, yolo_detections
     while True:
-        with lock:
-            if frame is None:
+        with frame_lock:
+            if current_frame is None:
                 continue
-            frame_copy = frame.copy()
+            img = current_frame.copy()
 
-        # YOLO processing
-        results = model(frame_copy, conf=0.3)
-        yolo_boxes = []
-        for result in results:
-            for box in result.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])  # Extract bounding box coordinates
-                confidence = box.conf[0]  # Confidence score
-                label = result.names[int(box.cls[0])]  # Detected object label
-                yolo_boxes.append((x1, y1, x2, y2, confidence, label))
+        results = detector(img, conf=0.3)
+        detections = []
+        for r in results:
+            for b in r.boxes:
+                x1, y1, x2, y2 = map(int, b.xyxy[0])
+                conf = b.conf[0]
+                cls_name = r.names[int(b.cls[0])]
+                detections.append((x1, y1, x2, y2, conf, cls_name))
 
-        with lock:
-            results_yolo = yolo_boxes
+        with frame_lock:
+            yolo_detections = detections
 
-# Face detection thread
-def process_faces():
-    global frame, results_faces
+# Thread function: Face Detection
+def face_thread():
+    global current_frame, face_detections
     while True:
-        with lock:
-            if frame is None:
+        with frame_lock:
+            if current_frame is None:
                 continue
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert frame to RGB
+            rgb_img = cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB)
 
-        # Face detection using MTCNN
-        boxes_faces, _ = mtcnn.detect(rgb_frame)
-        face_boxes = []
-        if boxes_faces is not None:
-            for box in boxes_faces:
-                face_boxes.append(tuple(map(int, box)))  # Convert box coordinates to integers
+        boxes, _ = face_detector.detect(rgb_img)
+        faces = []
+        if boxes is not None:
+            for b in boxes:
+                faces.append(tuple(map(int, b)))
 
-        with lock:
-            results_faces = face_boxes
+        with frame_lock:
+            face_detections = faces
 
-# Start processing threads
-threading.Thread(target=process_yolo, daemon=True).start()
-threading.Thread(target=process_faces, daemon=True).start()
+# Launch threads
+threading.Thread(target=yolo_thread, daemon=True).start()
+threading.Thread(target=face_thread, daemon=True).start()
 
-# Frame processing and display
+# Main loop
 while True:
-    ret, current_frame = cap.read()
+    ret, frame_feed = camera.read()
     if not ret:
-        print("Error: Could not read frame.")
+        print("Error: Frame capture failed.")
         break
 
-    with lock:
-        frame = current_frame.copy()
+    with frame_lock:
+        current_frame = frame_feed.copy()
 
     # Draw YOLO results
-    with lock:
-        for (x1, y1, x2, y2, confidence, label) in results_yolo:
-            box_width = x2 - x1
-            distance = calculate_distance(box_width)
+    with frame_lock:
+        for (x1, y1, x2, y2, conf, cls) in yolo_detections:
+            width_px = x2 - x1
+            dist = estimate_distance(width_px)
 
-            # Set bounding box color based on object type
-            if label == "person":  # Green for people
+            # Box color logic
+            if cls == "person":
                 color = (0, 255, 0)
-            elif label == "cell phone":  # Red for cell phones
+            elif cls == "cell phone":
                 color = (0, 0, 255)
-            else:  # Yellow for other objects
+            else:
                 color = (0, 255, 255)
 
-            # Draw bounding box for objects
-            cv2.rectangle(current_frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(current_frame, f'{label} {confidence:.2f}', (x1, y1 - 10),
+            cv2.rectangle(frame_feed, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame_feed, f'{cls} {conf:.2f}', (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-            # Display distance
-            if distance is not None:
-                cv2.putText(current_frame, f'Distance: {distance:.2f}m', (x1, y1 - 30),
+            if dist is not None:
+                cv2.putText(frame_feed, f'Distance: {dist:.2f}m', (x1, y1 - 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
 
-                # Display "So far!" for distances greater than 2 meters
-                if label == "person" and distance > 2.0:
-                    cv2.putText(current_frame, "So far!", (x1, y1 - 50),
+                if cls == "person" and dist > 2.0:
+                    cv2.putText(frame_feed, "So far!", (x1, y1 - 50),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-    # Draw face detection results
-    with lock:
-        for (x1, y1, x2, y2) in results_faces:
-            # Draw blue bounding box for faces
-            cv2.rectangle(current_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(current_frame, "Face", (x1, y1 - 10),
+    # Draw face results
+    with frame_lock:
+        for (fx1, fy1, fx2, fy2) in face_detections:
+            cv2.rectangle(frame_feed, (fx1, fy1), (fx2, fy2), (255, 0, 0), 2)
+            cv2.putText(frame_feed, "Face", (fx1, fy1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-    # Display frame
-    cv2.imshow('Object and Face Detection with Distance', current_frame)
+    # Show output window
+    cv2.imshow('Live Detection and Distance Estimation', frame_feed)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-cap.release()
+camera.release()
 cv2.destroyAllWindows()
