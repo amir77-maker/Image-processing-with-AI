@@ -46,9 +46,9 @@ KNOWN_WIDTH = 0.5  # meters
 FOCAL_LENGTH = 700  # mm
 
 
-Sample Output
+Sample Output:
 
-![test](https://github.com/user-attachments/assets/b5107149-a5fd-4790-905f-d0ada063936d)
+https://github.com/user-attachments/assets/b5107149-a5fd-4790-905f-d0ada063936d
 
 
  Notes
